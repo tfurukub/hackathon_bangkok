@@ -71,6 +71,15 @@ class NtnxRestApi:
         return rest_status, response
 
 if __name__ == "__main__":
+
+    def get_poweredon_vm(rest_api):
+        status, vms = rest_api.get_vmlist()
+        vm_list = []
+        for entity in vms.get("entities"):
+          if(entity.get('power_state') == 'on'):
+            vm_list.append(entity.get('name'))
+        return vm_list
+    
     try:
         pp = pprint.PrettyPrinter(indent=2)
 
@@ -89,19 +98,12 @@ if __name__ == "__main__":
           cvm_list.append(entity.get('controller_vm_backplane_ip'))
           ipmi_list.append(entity.get('ipmi_address'))
 
-        # Get VM List
-        status, vms = rest_api.get_vmlist()
-        vm_list = []
-        for entity in vms.get("entities"):
-          if(entity.get('power_state') == 'on'):
-            vm_list.append(entity.get('name'))
-
         # Shutting Down VMs
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(tgt_cluster_ip, username=tgt_username, password=tgt_password)
 
-        PowerOnVmList = vm_list
+        PowerOnVmList = get_poweredon_vm(rest_api)
 
         PowerOffCheckTimes = 0
 
