@@ -20,7 +20,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-# v1_BASE_URL = 'https://{}:9440/PrismGateway/services/rest/v1/'
+v1_BASE_URL = 'https://{}:9440/PrismGateway/services/rest/v1/'
 # self.v1_url = v1_BASE_URL.format(self.cluster_ip)
 v2_BASE_URL = 'https://{}:9440/api/nutanix/v2.0/'
 POST = 'post'
@@ -32,6 +32,7 @@ class NtnxRestApi:
         self.username = username
         self.password = password
         self.v2_url = v2_BASE_URL.format(self.cluster_ip)
+        self.v1_url = v1_BASE_URL.format(self.cluster_ip)
         self.session = self.get_server_session()
 
     def get_server_session(self):
@@ -59,6 +60,20 @@ class NtnxRestApi:
         print("Response code: {}".format(server_response.status_code))
         return server_response.status_code, json.loads(server_response.text)
 
+    def rest_call_v1(self, method_type, sub_url, payload_json):
+        if method_type == GET:
+            request_url = self.v1_url + sub_url
+            server_response = self.session.get(request_url)
+        elif method_type == POST:
+            request_url = self.v1_url + sub_url
+            server_response = self.session.post(request_url, payload_json)
+        else:
+            print("method type is wrong!")
+            return
+
+        print("Response code: {}".format(server_response.status_code))
+        return server_response.status_code, json.loads(server_response.text)
+
     def get_host(self):
         print("host information")
         rest_status, response = self.rest_call(GET, 'hosts', None)
@@ -66,9 +81,19 @@ class NtnxRestApi:
 
     def get_vmlist(self):
         print("Getting list of VMs")
-        rest_status, response = self.rest_call(GET, 'vms', None)
-
+        rest_status, response = self.rest_call(GET, 'vms/?include_vm_nic_config=true', None)
         return rest_status, response
+
+    def get_multicluster(self):
+        print("Check PC registration")
+        rest_status, response = self.rest_call_v1(GET, 'multicluster/cluster_external_state', None)
+        return rest_status, response
+
+    def get_fsvm(self):
+        print("Check FSVM")
+        rest_status, response = self.rest_call_v1(GET, 'vfilers', None)
+        return rest_status, response
+
 
 if __name__ == "__main__":
 
@@ -79,6 +104,30 @@ if __name__ == "__main__":
           if(entity.get('power_state') == 'on'):
             vm_list.append(entity.get('name'))
         return vm_list
+
+    def check_pc(rest_api):
+        status, response = rest_api.get_multicluster()
+        if len(response) > 0:
+            pc_ip = str(response[0].get('clusterDetails').get('ipAddresses')[0])
+
+        status, vms = rest_api.get_vmlist()
+        pc_name = []
+        for entity in vms.get("entities"):
+            if len(entity.get('vm_nics')) > 0:
+                vm_ip = entity.get('vm_nics')[0].get('ip_address')
+                print(vm_ip)
+                if vm_ip == pc_ip:
+                    pc_name.append(entity.get('name'))
+
+        return pc_name
+      
+    def check_fsvm(rest_api):
+        status, fsvm = rest_api.get_fsvm()
+        fsvm_list = []
+        for entity in fsvm.get('entities'):
+            for nvms in entity.get('nvms'):
+                fsvm_list.append(nvms.get('name'))
+        return fsvm_list
     
     try:
         pp = pprint.PrettyPrinter(indent=2)
@@ -98,29 +147,47 @@ if __name__ == "__main__":
           cvm_list.append(entity.get('controller_vm_backplane_ip'))
           ipmi_list.append(entity.get('ipmi_address'))
 
+        # Check PC registration
+        pc_name = check_pc(rest_api)
+        print("PC name = {}".format(pc_name))
+
+        # Check FSVM
+        fsvm_name = check_fsvm(rest_api)
+        print("FSVM name = {}".format(fsvm_name))
         # Shutting Down VMs
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(tgt_cluster_ip, username=tgt_username, password=tgt_password)
 
-        PowerOnVmList = get_poweredon_vm(rest_api)
 
-        PowerOffCheckTimes = 0
+        def get_list_uvm_state_on():
+          list_vm_state_on = get_poweredon_vm(rest_api)
+          list_pcvm = pc_name
+          list_fsvm = fsvm_name
+          list_pcvm_fsvm = list_pcvm + list_fsvm
+          # Remove PCVM and FSVM from List
+          list_uvm_state_on = [n for n in list_vm_state_on if n not in list_pcvm_fsvm]
+          return list_uvm_state_on
 
-        while PowerOffCheckTimes <= 5 :
-          if PowerOnVmList:
-            PowerOnVmList_Str = ",".join(PowerOnVmList)
-            print(PowerOnVmList_Str)
-            #command = "acli vm.shutdown {}".format(PowerOnVmList_Str)
-            PowerOffCheckTimes += 1
-            PowerOnVmList = ['test']
+        list_uvm_state_on = get_list_uvm_state_on()
+
+        MAX_CHECK_POWREDOFF = 5
+        times_check_powredoff = 0
+
+        while times_check_powredoff <= MAX_CHECK_POWREDOFF :
+          if list_uvm_state_on:
+            list_uvm_state_on_str = ",".join(list_uvm_state_on)
+            print(list_uvm_state_on_str)
+            #command = "acli vm.shutdown {}".format(list_uvm_state_on_str)
+            times_check_powredoff += 1
+            list_uvm_state_on = get_list_uvm_state_on()
           else:
-            print('VM Shutdown successfully completed')
+            print('Guest VM Shutdown has successfully completed')
             break
         else:
-          print('Shutdown remained VMs forcefully!!')
-          print('KILL {}'.format(PowerOnVmList))
-          #command = "acli vm.off {}".format(PowerOnVmList_Str)```
+          print('Power-off remained Guest VMs forcefully!!')
+          print('KILL {}'.format(list_uvm_state_on))
+          #command = "acli vm.off {}".format(list_uvm_state_on_str)
 
     except Exception as ex:
         print(ex)
